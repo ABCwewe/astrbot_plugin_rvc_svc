@@ -205,9 +205,9 @@ class MusicPlugin(Star):
         self.config.save_config()
         yield event.plain_result(f"RVC 后端链接已设置为: {_url}")
 
-    @filter.command("rvc")
+    @filter.command("rvc", alias={"翻唱"})
     async def rvc(self, event: AstrMessageEvent):
-        """RVC 翻唱命令"""
+        """RVC 翻唱命令（支持 /rvc 或 /翻唱）"""
         async for result in self._handle_cover(event, api_type="rvc"):
             yield result
 
@@ -289,11 +289,23 @@ class MusicPlugin(Star):
 
     async def _handle_cover(self, event: AstrMessageEvent, api_type="rvc"):
         """统一的翻唱处理逻辑"""
-        cmd = api_type  # "rvc" 或 "svc"
-        args = event.message_str.replace(cmd, "").strip().split()
+        msg_clean = event.message_str.strip()
+        # 移除常见的指令前缀字符
+        if msg_clean.startswith(("/", "!", "！", "、", "\\")):
+            msg_clean = msg_clean[1:].strip()
+
+        # 匹配并去除开头的指令名或别名
+        possible_cmds = ["rvc", "翻唱"] if api_type == "rvc" else ["svc"]
+        for c in possible_cmds:
+            if msg_clean.lower().startswith(c):
+                msg_clean = msg_clean[len(c):].strip()
+                break
+
+        args = msg_clean.split()
         
         if not args:
-            yield event.plain_result(f"用法: /{cmd} <歌名> [升降调] [分离方案]\n例如: /{cmd} 晴天 +2 msst")
+            example_cmd = "翻唱" if api_type == "rvc" else "svc"
+            yield event.plain_result(f"用法: /{example_cmd} <歌名> [升降调] [分离方案]\n例如: /{example_cmd} 晴天 +2 msst")
             return
 
         # 智能解析参数：提取升降调、分离方案、歌名

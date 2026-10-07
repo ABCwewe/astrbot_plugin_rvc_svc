@@ -4,6 +4,7 @@ import re
 import base64
 import asyncio
 import shutil
+import tempfile
 from datetime import datetime
 import traceback
 from functools import partial
@@ -15,6 +16,17 @@ from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.api.message_components import Node, Nodes, Plain, File, Record, Image as CompImage
 from astrbot.core.utils.session_waiter import session_waiter, SessionController
 from astrbot.api import logger
+
+class CompressedRecord(Record):
+    """
+    针对长音频/翻唱优化的 Record 类，重写 convert_to_base64。
+    避免 AstrBot 默认将音频强制解压为未压缩的无损 WAV（几万KB），
+    彻底解决 NapCat / OneBot 报 RangeError: Max payload size exceeded 的问题。
+    """
+    async def convert_to_base64(self) -> str:
+        if self.file and self.file.startswith("base64://"):
+            return self.file[9:]
+        return await super().convert_to_base64()
 
 # 分隔符常量
 MODEL_ALIAS_SEPARATOR = "|||"
@@ -672,17 +684,65 @@ class MusicPlugin(Star):
         return await self._send_interactive_msg(event, [node])
 
     @staticmethod
-    def _to_record(file_path: str = "", data: bytes | None = None) -> Record:
+    async def _compress_audio_to_compact_bytes(input_path: str, bitrate: str = "48k") -> bytes:
         """
-        参考 astrbot_plugin_GPT_SoVITS_multi_speaker 的语音实现:
-        1. 优先通过 Record.fromFileSystem 读取本地文件
-        2. 若失败或环境受限，读取二进制并转为 Base64，通过 Record.fromBase64 发送
+        使用 ffmpeg 将音频压缩为极小体积的 MP3 (单声道 24kHz 48kbps)，
+        使 3-5 分钟的完整歌曲数据严格控制在 1MB-2MB 之间，
+        避免 Base64 膨胀后超出 NapCat WebSocket maxPayload 限制。
         """
-        if file_path and os.path.exists(file_path):
+        if not input_path or not os.path.exists(input_path):
+            raise FileNotFoundError(f"音频文件不存在: {input_path}")
+
+        ffmpeg_bin = shutil.which("ffmpeg") or "ffmpeg"
+        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
+            tmp_name = tmp.name
+
+        try:
+            cmd = [
+                ffmpeg_bin, "-y",
+                "-i", input_path,
+                "-ac", "1",
+                "-ar", "24000",
+                "-b:a", bitrate,
+                tmp_name
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL
+            )
+            await proc.communicate()
+            if os.path.exists(tmp_name) and os.path.getsize(tmp_name) > 0:
+                with open(tmp_name, "rb") as f:
+                    compressed_data = f.read()
+                logger.info(f"音频压缩成功: {os.path.getsize(input_path)} -> {len(compressed_data)} 字节")
+                return compressed_data
+        except Exception as e:
+            logger.warning(f"ffmpeg 压缩音频失败或未安装 ffmpeg ({e})，将回退读取原文件")
+        finally:
+            if os.path.exists(tmp_name):
+                try:
+                    os.remove(tmp_name)
+                except OSError:
+                    pass
+
+        # 回退直接读取原文件
+        with open(input_path, "rb") as f:
+            return f.read()
+
+    @classmethod
+    async def _to_record(cls, file_path: str = "", data: bytes | None = None) -> CompressedRecord:
+        """
+        参考 astrbot_plugin_GPT_SoVITS_multi_speaker 并针对 NapCat WebSocket 大小限制优化:
+        1. 自动压缩为极小体积的 MP3 数据流 (1MB~2MB)
+        2. 返回定制的 CompressedRecord，防止 AstrBot 内部强制将其解压回 40MB WAV
+        3. 彻底根治 NapCat RangeError: Max payload size exceeded 错误
+        """
+        if not data and file_path and os.path.exists(file_path):
             try:
-                return Record.fromFileSystem(file_path)
+                data = await cls._compress_audio_to_compact_bytes(file_path)
             except Exception as e:
-                logger.warning(f"从文件系统加载 Record 失败 ({e})，尝试以 base64 读取")
+                logger.warning(f"音频压缩异常 ({e})，将直接读取原文件")
 
         if not data and file_path and os.path.exists(file_path):
             try:
@@ -694,8 +754,8 @@ class MusicPlugin(Star):
         if not data:
             raise ValueError(f"无法获取有效音频数据: {file_path}")
 
-        b64 = base64.urlsafe_b64encode(data).decode()
-        return Record.fromBase64(b64)
+        b64 = base64.b64encode(data).decode()
+        return CompressedRecord(file=f"base64://{b64}")
 
     async def _send_song(self, event: AstrMessageEvent, song: dict, model_name: str, key_shift: int, uvr_choice: str, api_type="rvc"):
         """根据 API 类型调用对应后端进行翻唱，并安全发送音频文件/语音条"""
@@ -795,11 +855,33 @@ class MusicPlugin(Star):
         file_sent = False
         last_error = None
 
-        # 辅助发送语音条 (Record) - 参考 GPT_SoVITS 的 _to_record 实现
+        # 辅助发送语音条 (Record) - 经过压缩优化，完全避免 WebSocket 溢出
         async def do_send_record() -> bool:
             nonlocal record_sent, last_error
             try:
-                record_seg = self._to_record(file_path)
+                record_seg = await self._to_record(file_path)
+
+                # 针对 OneBot 环境，优先尝试底层 call_action 直接发送，确保最稳定的 payload 传输
+                if callable(call_action):
+                    try:
+                        routing = {}
+                        raw_event = getattr(getattr(event, "message_obj", None), "raw_message", None)
+                        if isinstance(raw_event, dict) and raw_event.get("self_id"):
+                            routing["self_id"] = raw_event["self_id"]
+                        msg_payload = [{"type": "record", "data": {"file": record_seg.file}}]
+                        if group_id:
+                            await call_action("send_group_msg", group_id=int(group_id), message=msg_payload, **routing)
+                            record_sent = True
+                            logger.info(f"OneBot QQ群语音 (Record) 直发成功: {file_path}")
+                            return True
+                        elif sender_id:
+                            await call_action("send_private_msg", user_id=int(sender_id), message=msg_payload, **routing)
+                            record_sent = True
+                            logger.info(f"OneBot QQ私聊语音 (Record) 直发成功: {file_path}")
+                            return True
+                    except Exception as e_direct:
+                        logger.warning(f"OneBot call_action 发送语音异常，尝试通过 event.send 回退: {e_direct}")
+
                 await event.send(event.chain_result([record_seg]))
                 record_sent = True
                 logger.info(f"QQ语音消息 (Record) 发送成功: {file_path}")

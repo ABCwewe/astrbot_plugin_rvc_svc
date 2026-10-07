@@ -15,7 +15,11 @@
     "description": "默认使用的音乐 API",
     "type": "string",
     "hint": "可选 'netease' 或 'netease_nodejs'，推荐使用 'netease_nodejs'",
-    "default": "netease_nodejs"
+    "default": "netease_nodejs",
+    "options": [
+      "netease_nodejs",
+      "netease"
+    ]
   },
   "nodejs_base_url": {
     "description": "网易云音乐 Node.js API 地址",
@@ -51,7 +55,12 @@
     "description": "默认人声分离方案",
     "type": "string",
     "hint": "可选: 'VR-HP5 (默认)' (UVR5), 'MSST BS-Roformer', 'MSST 串联管线 (becruily_deux + 去混响)'",
-    "default": "VR-HP5 (默认)"
+    "default": "VR-HP5 (默认)",
+    "options": [
+      "VR-HP5 (默认)",
+      "MSST BS-Roformer",
+      "MSST 串联管线 (becruily_deux + 去混响)"
+    ]
   },
   "ask_uvr_model": {
     "description": "翻唱时是否交互选择人声分离方案",
@@ -63,6 +72,11 @@
     "description": "翻唱结果发送模式",
     "type": "string",
     "hint": "可选: 'file' (音频文件/群文件，推荐，完整稳定支持长歌曲), 'record' (QQ语音条，失败自动回退为文件), 'both' (同时发送语音和文件)",
-    "default": "file"
+    "default": "file",
+    "options": [
+      "file",
+      "record",
+      "both"
+    ]
   }
 }

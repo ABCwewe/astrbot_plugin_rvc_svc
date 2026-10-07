@@ -50,8 +50,8 @@
 |--------|------|--------|
 | `rvc_base_url` | RVCAPI 后端地址 | `http://127.0.0.1:7860/` |
 | `svc_base_url` | SVCAPI 后端地址 | `http://127.0.0.1:7866/` |
-| `default_api` | 音乐 API 类型 | `netease_nodejs` |
-| `nodejs_base_url` | 网易云 API 地址 | `https://163api.qijieya.cn` |
+| `default_api` | 音乐 API 类型 (`netease` 官方原生 / `netease_nodejs` 自建) | `netease` |
+| `nodejs_base_url` | 网易云 API 地址（仅在自建 Node.js 时需要） | `http://127.0.0.1:3000` |
 | `timeout` | 用户选择超时时间（秒） | `60` |
 | `inference_timeout` | AI 推理超时时间（秒） | `300` |
 | `rvc_models_keywords` | RVC 模型别名列表 格式为 '模型文件名\|\|\|别名' | `[]` |

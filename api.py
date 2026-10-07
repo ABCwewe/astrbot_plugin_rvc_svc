@@ -92,12 +92,15 @@ class NetEaseMusicAPI:
         await self.session.close()
 class NetEaseMusicAPINodeJs:
     """
-    网易云音乐API NodeJs版本
+    网易云音乐API NodeJs版本（具备 SSL 容错与全自动官方降级机制）
     """
-    def __init__(self, base_url:str):
-        # http://netease_cloud_music_api:{port}/
-        self.base_url = base_url
-        self.session = aiohttp.ClientSession(base_url)
+    def __init__(self, base_url: str):
+        self.base_url = (base_url or "").rstrip("/")
+        # 使用非严格 SSL 校验及安全超时配置，避免老旧服务器/自签名证书 SSL 握手失败崩溃
+        connector = aiohttp.TCPConnector(ssl=False)
+        timeout = aiohttp.ClientTimeout(total=8)
+        self.session = aiohttp.ClientSession(base_url=self.base_url, connector=connector, timeout=timeout)
+        self._fallback_api = NetEaseMusicAPI()
 
     async def _request(self, url: str, data: dict = {}, method: str = "GET"):
         if method.upper() == "POST":
@@ -112,52 +115,78 @@ class NetEaseMusicAPINodeJs:
         else:
             raise ValueError("不支持的请求方式")
 
-
     async def fetch_data(self, keyword: str, limit=5) -> list[dict]:
-        """搜索歌曲"""
+        """搜索歌曲（失败时自动无缝降级至网易云原生官方接口）"""
         url = "/search"
         data = {"keywords": keyword, "limit": limit, "type": 1, "offset": 0}
 
-        result = await self._request(url, data=data, method="POST")
-        res = [
-            {
-                "id": song["id"],
-                "name": song["name"],
-                "artists": "、".join(artist["name"] for artist in song["artists"]),
-                "duration": song["duration"],
-            }
-            for song in result["result"]["songs"][:limit]
-        ]
-
-        return res
+        try:
+            result = await self._request(url, data=data, method="POST")
+            songs = result.get("result", {}).get("songs", [])
+            if not songs:
+                raise ValueError("Node.js API 返回空歌曲列表")
+            return [
+                {
+                    "id": song["id"],
+                    "name": song["name"],
+                    "artists": "、".join(artist["name"] for artist in song.get("artists", [])),
+                    "duration": song.get("duration", 0),
+                }
+                for song in songs[:limit]
+            ]
+        except Exception as e:
+            logger.warning(f"Node.js 音乐接口 ({self.base_url}) 请求失败: {e}，正在自动降级至网易云原生官方接口...")
+            return await self._fallback_api.fetch_data(keyword=keyword, limit=limit)
 
     async def fetch_comments(self, song_id: int):
-        """获取热评"""
+        """获取热评（失败时自动降级）"""
         url = "/comment/hot"
         data = {
             "id": song_id,
             "type": 0,
         }
-        result = await self._request(url, data=data, method="POST")
-        return result.get("hotComments", [])
+        try:
+            result = await self._request(url, data=data, method="POST")
+            return result.get("hotComments", [])
+        except Exception as e:
+            logger.warning(f"Node.js 获取热评失败: {e}，正在降级至原生接口...")
+            return await self._fallback_api.fetch_comments(song_id=song_id)
 
     async def fetch_lyrics(self, song_id):
-        """获取歌词"""
-        url = f"{self.base_url}/lyric?id={song_id}"
-        result = await self._request(url)
-        return result.get("lrc", {}).get("lyric", "歌词未找到")
+        """获取歌词（失败时自动降级）"""
+        url = f"/lyric?id={song_id}"
+        try:
+            result = await self._request(url)
+            return result.get("lrc", {}).get("lyric", "歌词未找到")
+        except Exception as e:
+            logger.warning(f"Node.js 获取歌词失败: {e}，正在降级至原生接口...")
+            return await self._fallback_api.fetch_lyrics(song_id=song_id)
+
     async def fetch_extra(self, song_id: str | int) -> dict[str, str]:
-        """
-        获取额外信息
-        """
+        """获取额外信息（失败时自动降级）"""
         url = "/song/url"
         data = {"id": song_id}
-        result = await self._request(url, data=data, method="POST")
-        return {
-            "audio_url": result["data"][0].get("url", "")
-        }
+        try:
+            result = await self._request(url, data=data, method="POST")
+            data_list = result.get("data", [])
+            if data_list:
+                return {
+                    "audio_url": data_list[0].get("url", "")
+                }
+            raise ValueError("未获取到歌曲地址")
+        except Exception as e:
+            logger.warning(f"Node.js 获取播放链接失败: {e}，正在降级至原生接口...")
+            return await self._fallback_api.fetch_extra(song_id=song_id)
+
     async def close(self):
-        await self.session.close()
+        try:
+            await self.session.close()
+        except Exception:
+            pass
+        try:
+            await self._fallback_api.close()
+        except Exception:
+            pass
 class MusicSearcher:
     """
     用于从指定音乐平台搜索歌曲信息的工具类。

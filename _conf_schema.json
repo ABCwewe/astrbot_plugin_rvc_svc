@@ -14,18 +14,18 @@
   "default_api": {
     "description": "默认使用的音乐 API",
     "type": "string",
-    "hint": "可选 'netease' 或 'netease_nodejs'，推荐使用 'netease_nodejs'",
-    "default": "netease_nodejs",
+    "hint": "推荐 'netease'（官方稳定原生接口，开箱即用无需搭建外部服务）。若自建了 NeteaseCloudMusicApi 可选 'netease_nodejs'",
+    "default": "netease",
     "options": [
-      "netease_nodejs",
-      "netease"
+      "netease",
+      "netease_nodejs"
     ]
   },
   "nodejs_base_url": {
     "description": "网易云音乐 Node.js API 地址",
     "type": "string",
-    "hint": "仅在 default_api 设置为 'netease_nodejs' 时生效",
-    "default": "https://wyy.xhily.com"
+    "hint": "仅在 default_api 设置为 'netease_nodejs' 时生效，例如自建服务的 'http://127.0.0.1:3000'",
+    "default": "http://127.0.0.1:3000"
   },
   "timeout": {
     "description": "等待用户选择的超时时间（秒）",

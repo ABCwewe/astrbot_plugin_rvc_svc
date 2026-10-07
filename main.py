@@ -76,8 +76,8 @@ class MusicPlugin(Star):
         self.svc_base_url = config.get("svc_base_url", "http://127.0.0.1:7866/")
         
         # === 音乐 API 配置 ===
-        self.default_api = config.get("default_api", "netease_nodejs")
-        self.nodejs_base_url = config.get("nodejs_base_url", "https://163api.qijieya.cn")
+        self.default_api = config.get("default_api", "netease")
+        self.nodejs_base_url = config.get("nodejs_base_url", "http://127.0.0.1:3000")
         self.timeout = config.get("timeout", 60)
         
         # === 模型列表配置 ===

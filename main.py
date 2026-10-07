@@ -1,6 +1,7 @@
 from pathlib import Path
 import os
 import re
+import base64
 import asyncio
 import shutil
 from datetime import datetime
@@ -61,10 +62,10 @@ UVR_ALIAS_MAP = {
 
 @register(
     "astrbot_plugin_rvc_svc",
-    "CCYellowStar2",
+    "ABCwewe",
     "RVC/SVC翻唱网易云歌曲",
-    "1.1.0",
-    "https://github.com/CCYellowStar2/astrbot_plugin_rvc_svc",
+    "1.1.2",
+    "https://github.com/ABCwewe/astrbot_plugin_rvc_svc",
 )
 class MusicPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -89,7 +90,7 @@ class MusicPlugin(Star):
         # === 人声分离与发送配置 ===
         self.uvr_model = self._normalize_uvr_model(config.get("uvr_model", UVR_VR_HP5))
         self.ask_uvr_model = config.get("ask_uvr_model", False)
-        self.send_mode = config.get("send_mode", "file")
+        self.send_mode = config.get("send_mode", "record")
         
         if self.default_api == "netease":
             try:
@@ -482,14 +483,15 @@ class MusicPlugin(Star):
                 self._delayed_recall_messages(event, list(interactive_msg_ids), delay_seconds=5)
             )
 
-        await self._send_song(
+        async for res in self._send_song(
             event=event,
             song=selected_song,
             model_name=selected_model,
             key_shift=key_shift,
             uvr_choice=specified_uvr,
             api_type=api_type
-        )
+        ):
+            yield res
 
     # ==================== 交互辅助及消息撤回方法 ====================
 
@@ -661,8 +663,34 @@ class MusicPlugin(Star):
         )
         return await self._send_interactive_msg(event, [node])
 
+    @staticmethod
+    def _to_record(file_path: str = "", data: bytes | None = None) -> Record:
+        """
+        参考 astrbot_plugin_GPT_SoVITS_multi_speaker 的语音实现:
+        1. 优先通过 Record.fromFileSystem 读取本地文件
+        2. 若失败或环境受限，读取二进制并转为 Base64，通过 Record.fromBase64 发送
+        """
+        if file_path and os.path.exists(file_path):
+            try:
+                return Record.fromFileSystem(file_path)
+            except Exception as e:
+                logger.warning(f"从文件系统加载 Record 失败 ({e})，尝试以 base64 读取")
+
+        if not data and file_path and os.path.exists(file_path):
+            try:
+                with open(file_path, "rb") as f:
+                    data = f.read()
+            except Exception as e:
+                logger.warning(f"读取音频文件二进制失败: {e}")
+
+        if not data:
+            raise ValueError(f"无法获取有效音频数据: {file_path}")
+
+        b64 = base64.urlsafe_b64encode(data).decode()
+        return Record.fromBase64(b64)
+
     async def _send_song(self, event: AstrMessageEvent, song: dict, model_name: str, key_shift: int, uvr_choice: str, api_type="rvc"):
-        """根据 API 类型调用对应后端进行翻唱，并安全发送音频文件"""
+        """根据 API 类型调用对应后端进行翻唱，并安全发送音频文件/语音条"""
         result_path = None
         try:
             base_url = self.svc_base_url if api_type == "svc" else self.rvc_base_url
@@ -712,17 +740,18 @@ class MusicPlugin(Star):
                 )
 
             if result_path and os.path.exists(result_path):
-                await self._send_audio_result(event, result_path, song["name"], api_type)
+                async for res in self._send_audio_result(event, result_path, song["name"], api_type):
+                    yield res
             else:
-                await event.send(event.plain_result("生成失败，后端未返回有效文件路径。"))
+                yield event.plain_result("生成失败，后端未返回有效文件路径。")
         except Exception as e:
             logger.error(traceback.format_exc())
             if "Timeout" in str(e):
-                await event.send(event.plain_result(f"生成超时了！后端在 {self.inference_timeout} 秒内没有完成任务。如果需要，请在配置文件中调高 'inference_timeout' 的值。"))
+                yield event.plain_result(f"生成超时了！后端在 {self.inference_timeout} 秒内没有完成任务。如果需要，请在配置文件中调高 'inference_timeout' 的值。")
             else:
-                await event.send(event.plain_result(f"生成时发生严重错误: {e}"))
+                yield event.plain_result(f"生成时发生严重错误: {e}")
 
-    async def _safe_cleanup_file(self, file_path: str, delay_seconds: int = 20):
+    async def _safe_cleanup_file(self, file_path: str, delay_seconds: int = 60):
         """异步延迟清理临时文件，确保协议端异步读取和上传完成后再删除"""
         if not file_path or not os.path.isfile(file_path):
             return
@@ -736,11 +765,9 @@ class MusicPlugin(Star):
 
     async def _send_audio_result(self, event: AstrMessageEvent, result_path: str, song_name: str, api_type: str):
         """
-        发送音频文件，完美解决 OneBot (QQ) 协议端发送阶段失败的问题：
-        1. 长音频 (歌曲通常长达数分钟) 超过 QQ 语音条 60s 限制时，避免被服务器拒绝。
-        2. 针对 OneBot 群聊优先调用 upload_group_file，私聊调用 upload_private_file。
-        3. 自动回退 AstrBot File 组件及 Record 组件，兼具鲁棒性与音质。
-        4. 异步延迟清理本地临时文件，杜绝过早删除导致协议端读取不到。
+        发送音频文件/语音条：
+        参考 astrbot_plugin_GPT_SoVITS_multi_speaker 的语音发送实现，默认优先发送 QQ 语音条 (Record)。
+        具备异常降级机制，若语音条受限可自动回退群文件/通用文件发送。
         """
         file_path = os.path.abspath(result_path)
         safe_name = re.sub(r'[\\/:*?"<>|]', '', song_name).strip() or "翻唱"
@@ -754,11 +781,25 @@ class MusicPlugin(Star):
         call_action = getattr(bot, "call_action", None)
         group_id = event.get_group_id()
         sender_id = event.get_sender_id()
-        send_mode = str(self.config.get("send_mode", "file")).lower()
+        send_mode = str(self.config.get("send_mode", "record")).lower()
 
         record_sent = False
         file_sent = False
         last_error = None
+
+        # 辅助发送语音条 (Record) - 参考 GPT_SoVITS 的 _to_record 实现
+        async def do_send_record() -> bool:
+            nonlocal record_sent, last_error
+            try:
+                record_seg = self._to_record(file_path)
+                await event.send(event.chain_result([record_seg]))
+                record_sent = True
+                logger.info(f"QQ语音消息 (Record) 发送成功: {file_path}")
+                return True
+            except Exception as e_rec:
+                logger.warning(f"QQ语音消息 (Record) 发送失败 (常见原因: 歌曲超过60秒/协议端限制): {e_rec}")
+                last_error = e_rec
+                return False
 
         # 辅助发送文件
         async def do_send_file() -> bool:
@@ -806,35 +847,28 @@ class MusicPlugin(Star):
                 last_error = e_file
                 return False
 
-        # 辅助发送语音条 (Record)
-        async def do_send_record() -> bool:
-            nonlocal record_sent, last_error
-            try:
-                await event.send(event.chain_result([Record(file=file_path)]))
-                record_sent = True
-                logger.info(f"QQ语音消息 (Record) 发送成功: {file_path}")
-                return True
-            except Exception as e_rec:
-                logger.warning(f"QQ语音消息 (Record) 发送失败 (常见原因: 歌曲超过60秒/协议端限制): {e_rec}")
-                last_error = e_rec
-                return False
-
         # 根据配置模式执行发送
-        if send_mode == "file":
-            await do_send_file()
-        elif send_mode == "record":
+        if send_mode == "record":
             ok = await do_send_record()
             if not ok:
-                await event.send(event.plain_result("⚠️ QQ语音条发送失败（可能因歌曲超长或协议端限制），正在自动改发音频文件..."))
+                yield event.plain_result("⚠️ QQ语音条发送失败（可能因歌曲超长或协议端限制），正在自动改发音频文件...")
                 await do_send_file()
+        elif send_mode == "file":
+            ok = await do_send_file()
+            if not ok:
+                yield event.plain_result("⚠️ 音频文件发送失败，尝试改为发送语音条...")
+                await do_send_record()
         elif send_mode == "both":
             await do_send_record()
             await do_send_file()
         else:
-            await do_send_file()
+            # 默认 record
+            ok = await do_send_record()
+            if not ok:
+                await do_send_file()
 
         if not file_sent and not record_sent:
-            await event.send(event.plain_result(f"音频发送失败: {last_error or '未知错误'}，请检查网络或协议端权限。"))
+            yield event.plain_result(f"音频发送失败: {last_error or '未知错误'}，请检查网络或协议端权限。")
         
         # 异步延迟清理本地临时文件，避免立即删除导致协议端异步读取失败
-        asyncio.create_task(self._safe_cleanup_file(file_path, delay_seconds=20))
+        asyncio.create_task(self._safe_cleanup_file(file_path, delay_seconds=60))

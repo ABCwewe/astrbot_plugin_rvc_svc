@@ -71,11 +71,11 @@
   "send_mode": {
     "description": "翻唱结果发送模式",
     "type": "string",
-    "hint": "可选: 'file' (音频文件/群文件，推荐，完整稳定支持长歌曲), 'record' (QQ语音条，失败自动回退为文件), 'both' (同时发送语音和文件)",
-    "default": "file",
+    "hint": "可选: 'record' (QQ语音条，默认，参考GPT-SoVITS), 'file' (音频文件/群文件), 'both' (同时发送语音条和文件)",
+    "default": "record",
     "options": [
-      "file",
       "record",
+      "file",
       "both"
     ]
   }

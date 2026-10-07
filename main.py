@@ -11,7 +11,7 @@ from gradio_client import Client
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.core.config.astrbot_config import AstrBotConfig
-from astrbot.api.message_components import Node, Plain, File, Record, Image as CompImage
+from astrbot.api.message_components import Node, Nodes, Plain, File, Record, Image as CompImage
 from astrbot.core.utils.session_waiter import session_waiter, SessionController
 from astrbot.api import logger
 
@@ -328,9 +328,17 @@ class MusicPlugin(Star):
             yield event.plain_result("没能找到这首歌喵~")
             return
         
+        # 跟踪交互过程中的临时消息 ID，用于超时撤回或交互完成后延迟撤回
+        interactive_msg_ids = []
+
         # --- 步骤 1: 等待用户选择歌曲 ---
-        await self._send_selection(event, songs)
-        yield event.plain_result(f"请在{self.timeout}秒内输入歌曲序号进行选择：")
+        song_card_id = await self._send_selection(event, songs)
+        if song_card_id:
+            interactive_msg_ids.append(song_card_id)
+
+        tip_id = await self._send_interactive_msg(event, [Plain(f"请在{self.timeout}秒内输入歌曲序号进行选择：")])
+        if tip_id:
+            interactive_msg_ids.append(tip_id)
         
         selected_song_index = None
         user_id = event.get_sender_id()
@@ -343,15 +351,20 @@ class MusicPlugin(Star):
             u_input = waiter_event.message_str.strip()
             if u_input.isdigit() and 1 <= int(u_input) <= len(songs):
                 selected_song_index = int(u_input) - 1
+                u_mid = self._extract_event_msg_id(waiter_event)
+                if u_mid:
+                    interactive_msg_ids.append(u_mid)
                 controller.stop()
 
         try:
             await song_waiter(event)
         except TimeoutError:
+            await self._recall_messages(event, interactive_msg_ids)
             yield event.plain_result("选择超时，操作已取消。")
             return
         
         if selected_song_index is None:
+            await self._recall_messages(event, interactive_msg_ids)
             return
              
         selected_song = songs[selected_song_index]
@@ -359,17 +372,28 @@ class MusicPlugin(Star):
         # --- 步骤 2: 等待用户选择模型 ---
         display_str, keys = self.get_models_display_list(api_type=api_type)
         if not keys:
+            await self._recall_messages(event, interactive_msg_ids)
             yield event.plain_result(f"当前没有可用的 {api_type.upper()} 模型，请先使用 /刷新{api_type}模型。")
             return
         
-        chain = [Plain(f"已选歌曲: {selected_song['name']}\n使用引擎: {api_type.upper()}\n\n可用模型：\n{display_str}")]
+        chain = [
+            Plain(
+                f"已选歌曲: {selected_song['name']}\n"
+                f"使用引擎: {api_type.upper()}\n\n"
+                f"可用模型：\n{display_str}\n\n"
+                f"👉 请在 {self.timeout} 秒内输入模型序号进行选择"
+            )
+        ]
         node = Node(
             uin=3974507586,
             name="玖玖瑠",
             content=chain
         )
-        await event.send(event.chain_result([node]))
-        yield event.plain_result(f"请在{self.timeout}秒内输入模型序号：")
+        model_card_id = await self._send_interactive_msg(event, [node])
+        if model_card_id:
+            interactive_msg_ids.append(model_card_id)
+        
+        # 优化：已去除单独发送的"请在30秒内输入模型序号："，提示已直接整合于卡片中
         
         selected_model_index = None
 
@@ -381,15 +405,20 @@ class MusicPlugin(Star):
             u_input = waiter_event.message_str.strip()
             if u_input.isdigit() and 1 <= int(u_input) <= len(keys):
                 selected_model_index = int(u_input) - 1
+                u_mid = self._extract_event_msg_id(waiter_event)
+                if u_mid:
+                    interactive_msg_ids.append(u_mid)
                 controller.stop()
 
         try:
             await model_waiter(event)
         except TimeoutError:
+            await self._recall_messages(event, interactive_msg_ids)
             yield event.plain_result("选择超时，操作已取消。")
             return
 
         if selected_model_index is None:
+            await self._recall_messages(event, interactive_msg_ids)
             return
 
         selected_model = keys[selected_model_index]
@@ -397,14 +426,20 @@ class MusicPlugin(Star):
         # --- 可选步骤: 用户交互选择分离方案 (若开启且未在命令中指定) ---
         if not specified_uvr and self.ask_uvr_model:
             uvr_opts = "\n".join([f"{i}. {opt}" for i, opt in enumerate(UVR_CHOICES_LIST, start=1)])
-            chain_uvr = [Plain(f"请选择人声分离方案：\n{uvr_opts}")]
+            chain_uvr = [
+                Plain(
+                    f"请选择人声分离方案：\n{uvr_opts}\n\n"
+                    f"👉 请在 {self.timeout} 秒内输入分离方案序号（超时将默认使用当前配置）"
+                )
+            ]
             node_uvr = Node(
                 uin=3974507586,
                 name="玖玖瑠",
                 content=chain_uvr
             )
-            await event.send(event.chain_result([node_uvr]))
-            yield event.plain_result(f"请在{self.timeout}秒内输入分离方案序号（直接回车或超时默认使用当前配置）：")
+            uvr_card_id = await self._send_interactive_msg(event, [node_uvr])
+            if uvr_card_id:
+                interactive_msg_ids.append(uvr_card_id)
 
             selected_uvr_idx = None
 
@@ -416,6 +451,9 @@ class MusicPlugin(Star):
                 u_input = waiter_event.message_str.strip()
                 if u_input.isdigit() and 1 <= int(u_input) <= len(UVR_CHOICES_LIST):
                     selected_uvr_idx = int(u_input) - 1
+                    u_mid = self._extract_event_msg_id(waiter_event)
+                    if u_mid:
+                        interactive_msg_ids.append(u_mid)
                     controller.stop()
 
             try:
@@ -437,6 +475,13 @@ class MusicPlugin(Star):
             f"🔹 人声分离方案: {specified_uvr}\n"
             f"请耐心等待..."
         )
+
+        # 交互完成，5秒后自动撤回之前的交互消息
+        if interactive_msg_ids:
+            asyncio.create_task(
+                self._delayed_recall_messages(event, list(interactive_msg_ids), delay_seconds=5)
+            )
+
         await self._send_song(
             event=event,
             song=selected_song,
@@ -446,15 +491,175 @@ class MusicPlugin(Star):
             api_type=api_type
         )
 
-    async def _send_selection(self, event: AstrMessageEvent, songs: list):
+    # ==================== 交互辅助及消息撤回方法 ====================
+
+    def _extract_message_id(self, result: any) -> int | None:
+        """从各种格式的 API 返回值中提取 message_id"""
+        if result is None:
+            return None
+        if isinstance(result, int):
+            return result
+        if isinstance(result, str) and result.strip().isdigit():
+            return int(result.strip())
+        if isinstance(result, dict):
+            for k in ("message_id", "msg_id", "id"):
+                if k in result and result[k] is not None:
+                    mid = self._extract_message_id(result[k])
+                    if mid:
+                        return mid
+            if "data" in result:
+                mid = self._extract_message_id(result["data"])
+                if mid:
+                    return mid
+        return None
+
+    def _extract_event_msg_id(self, event: AstrMessageEvent) -> int | None:
+        """从 AstrMessageEvent 事件对象中提取消息 ID"""
+        if not event:
+            return None
+        for attr in ("message_id", "msg_id"):
+            val = getattr(event, attr, None)
+            mid = self._extract_message_id(val)
+            if mid:
+                return mid
+        msg_obj = getattr(event, "message_obj", None)
+        if msg_obj:
+            val = getattr(msg_obj, "message_id", None)
+            mid = self._extract_message_id(val)
+            if mid:
+                return mid
+            raw = getattr(msg_obj, "raw_message", None)
+            if isinstance(raw, dict):
+                mid = self._extract_message_id(raw.get("message_id"))
+                if mid:
+                    return mid
+        return None
+
+    async def _send_interactive_msg(self, event: AstrMessageEvent, components: list) -> int | None:
+        """
+        发送交互临时消息，并尽量捕获并返回其 message_id，方便后续自动撤回。
+        """
+        bot = getattr(event, "bot", None)
+        call_action = getattr(bot, "call_action", None)
+        group_id = event.get_group_id()
+        sender_id = event.get_sender_id()
+        raw_event = getattr(getattr(event, "message_obj", None), "raw_message", None)
+
+        if callable(call_action):
+            try:
+                has_node = any(isinstance(c, (Node, Nodes)) for c in components)
+                if has_node:
+                    for comp in components:
+                        if isinstance(comp, Node):
+                            nodes = Nodes([comp])
+                        elif isinstance(comp, Nodes):
+                            nodes = comp
+                        else:
+                            continue
+
+                        payload = await nodes.to_dict()
+                        if group_id:
+                            payload["group_id"] = int(group_id) if str(group_id).isdigit() else group_id
+                            if isinstance(raw_event, dict) and raw_event.get("self_id"):
+                                payload["self_id"] = raw_event["self_id"]
+                            res = await call_action("send_group_forward_msg", **payload)
+                            msg_id = self._extract_message_id(res)
+                            if msg_id:
+                                return msg_id
+                        elif sender_id:
+                            payload["user_id"] = int(sender_id) if str(sender_id).isdigit() else sender_id
+                            if isinstance(raw_event, dict) and raw_event.get("self_id"):
+                                payload["self_id"] = raw_event["self_id"]
+                            res = await call_action("send_private_forward_msg", **payload)
+                            msg_id = self._extract_message_id(res)
+                            if msg_id:
+                                return msg_id
+                else:
+                    # 普通文本等消息
+                    from astrbot.api.event import MessageChain
+                    from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
+                    parsed_msgs = await AiocqhttpMessageEvent._parse_onebot_json(MessageChain(components))
+                    if parsed_msgs:
+                        routing = {}
+                        if isinstance(raw_event, dict) and raw_event.get("self_id"):
+                            routing["self_id"] = raw_event["self_id"]
+                        if group_id:
+                            res = await call_action(
+                                "send_group_msg",
+                                group_id=int(group_id) if str(group_id).isdigit() else group_id,
+                                message=parsed_msgs,
+                                **routing
+                            )
+                            msg_id = self._extract_message_id(res)
+                            if msg_id:
+                                return msg_id
+                        elif sender_id:
+                            res = await call_action(
+                                "send_private_msg",
+                                user_id=int(sender_id) if str(sender_id).isdigit() else sender_id,
+                                message=parsed_msgs,
+                                **routing
+                            )
+                            msg_id = self._extract_message_id(res)
+                            if msg_id:
+                                return msg_id
+            except Exception as e:
+                logger.debug(f"通过 OneBot call_action 发送交互消息异常: {e}，将回退标准发送")
+
+        # 兜底回退 AstrBot 原生 event.send
+        try:
+            res = await event.send(event.chain_result(components))
+            return self._extract_message_id(res)
+        except Exception as e:
+            logger.warning(f"发送交互消息兜底失败: {e}")
+            return None
+
+    async def _recall_messages(self, event: AstrMessageEvent, message_ids: list):
+        """立即撤回指定的若干消息"""
+        if not message_ids:
+            return
+        bot = getattr(event, "bot", None)
+        call_action = getattr(bot, "call_action", None)
+        for mid in set(message_ids):
+            if not mid:
+                continue
+            try:
+                numeric_mid = int(mid) if str(mid).isdigit() else mid
+                if callable(call_action):
+                    await call_action("delete_msg", message_id=numeric_mid)
+                elif hasattr(event, "delete_msg") and callable(event.delete_msg):
+                    await event.delete_msg(numeric_mid)
+                elif hasattr(bot, "delete_msg") and callable(getattr(bot, "delete_msg", None)):
+                    await bot.delete_msg(message_id=numeric_mid)
+                logger.debug(f"已请求撤回交互消息 ID: {numeric_mid}")
+            except Exception as e:
+                logger.debug(f"撤回消息 {mid} 忽略异常 (可能无权限、已撤回或协议端限制): {e}")
+
+    async def _delayed_recall_messages(self, event: AstrMessageEvent, message_ids: list, delay_seconds: int = 5):
+        """延迟指定秒数后撤回交互消息"""
+        if not message_ids:
+            return
+        try:
+            await asyncio.sleep(delay_seconds)
+            await self._recall_messages(event, message_ids)
+        except Exception as e:
+            logger.debug(f"延迟撤回交互消息异常: {e}")
+
+    async def _send_selection(self, event: AstrMessageEvent, songs: list) -> int | None:
         formatted_songs = [f"{i + 1}. {s['name']} - {s['artists']}" for i, s in enumerate(songs[:10])]
-        chain = [Plain("为您找到以下歌曲：\n" + "\n".join(formatted_songs))]
+        chain = [
+            Plain(
+                "为您找到以下歌曲：\n"
+                + "\n".join(formatted_songs)
+                + f"\n\n👉 请在 {self.timeout} 秒内输入歌曲序号进行选择"
+            )
+        ]
         node = Node(
             uin=3974507586,
             name="玖玖瑠",
             content=chain
         )
-        await event.send(event.chain_result([node]))
+        return await self._send_interactive_msg(event, [node])
 
     async def _send_song(self, event: AstrMessageEvent, song: dict, model_name: str, key_shift: int, uvr_choice: str, api_type="rvc"):
         """根据 API 类型调用对应后端进行翻唱，并安全发送音频文件"""

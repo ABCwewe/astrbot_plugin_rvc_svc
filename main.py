@@ -337,10 +337,6 @@ class MusicPlugin(Star):
         if song_card_id:
             interactive_msg_ids.append(song_card_id)
 
-        tip_id = await self._send_interactive_msg(event, [Plain(f"请在{self.timeout}秒内输入歌曲序号进行选择：")])
-        if tip_id:
-            interactive_msg_ids.append(tip_id)
-        
         selected_song_index = None
         user_id = event.get_sender_id()
         

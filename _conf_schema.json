@@ -46,5 +46,23 @@
     "type": "list",
     "hint": "这是一个列表，每行一个模型。格式为 '模型文件名|||别名'。如果|||后面为空，则直接显示文件名。使用 /刷新svc模型 命令自动获取",
     "default": []
+  },
+  "uvr_model": {
+    "description": "默认人声分离方案",
+    "type": "string",
+    "hint": "可选: 'VR-HP5 (默认)' (UVR5), 'MSST BS-Roformer', 'MSST 串联管线 (becruily_deux + 去混响)'",
+    "default": "VR-HP5 (默认)"
+  },
+  "ask_uvr_model": {
+    "description": "翻唱时是否交互选择人声分离方案",
+    "type": "bool",
+    "hint": "开启后，翻唱时若未在指令中指定分离方案，将在选完模型后让用户选择分离模型；关闭则直接使用默认分离方案",
+    "default": false
+  },
+  "send_mode": {
+    "description": "翻唱结果发送模式",
+    "type": "string",
+    "hint": "可选: 'file' (音频文件/群文件，推荐，完整稳定支持长歌曲), 'record' (QQ语音条，失败自动回退为文件), 'both' (同时发送语音和文件)",
+    "default": "file"
   }
 }
